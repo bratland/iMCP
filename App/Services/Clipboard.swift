@@ -1,6 +1,5 @@
 import AppKit
 import JSONSchema
-import MCP
 import OSLog
 
 private let log = Logger.service("clipboard")
@@ -82,7 +81,16 @@ final class ClipboardService: Service {
     @MainActor
     private func readClipboard() async throws -> Value {
         let pasteboard = NSPasteboard.general
-        let types = pasteboard.types ?? []
+
+        guard let types = pasteboard.types else {
+            log.warning("Failed to get pasteboard types - pasteboard may be unavailable")
+            return .object([
+                "type": .string("error"),
+                "message": .string(
+                    "Unable to read clipboard. The system clipboard service may be temporarily unavailable."
+                ),
+            ])
+        }
 
         // Priority: files → image → text
         // Files first because Finder copies include both file URL and filename as text
@@ -121,6 +129,15 @@ final class ClipboardService: Service {
             ])
         }
 
+        // Clipboard has types but none we support
+        if !types.isEmpty {
+            log.debug("Clipboard contains unsupported types: \(types.map { $0.rawValue })")
+            return .object([
+                "type": .string("unsupported"),
+                "availableTypes": .array(types.map { .string($0.rawValue) }),
+            ])
+        }
+
         log.debug("Clipboard is empty")
         return .object([
             "type": .string("empty"),
@@ -136,17 +153,18 @@ final class ClipboardService: Service {
         }
 
         let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        let success = pasteboard.setString(content, forType: .string)
+        let changeCount = pasteboard.clearContents()
+        log.debug("Cleared clipboard, change count: \(changeCount)")
 
-        if success {
-            log.info("Wrote \(content.count) characters to clipboard")
-        } else {
+        let success = pasteboard.setString(content, forType: .string)
+        guard success else {
             log.error("Failed to write to clipboard")
+            throw ClipboardError.writeFailed
         }
 
+        log.info("Wrote \(content.count) characters to clipboard")
         return .object([
-            "success": .bool(success),
+            "success": .bool(true),
             "length": .int(content.count),
         ])
     }
