@@ -59,6 +59,7 @@ enum ServiceRegistry {
             RemindersService.shared,
             ShortcutsService.shared,
             UtilitiesService.shared,
+            ClipboardService.shared,
         ]
         #if WEATHERKIT_AVAILABLE
             services.append(WeatherService.shared)
@@ -69,6 +70,7 @@ enum ServiceRegistry {
     static func configureServices(
         calendarEnabled: Binding<Bool>,
         captureEnabled: Binding<Bool>,
+        clipboardEnabled: Binding<Bool>,
         contactsEnabled: Binding<Bool>,
         locationEnabled: Binding<Bool>,
         mapsEnabled: Binding<Bool>,
@@ -92,6 +94,13 @@ enum ServiceRegistry {
                 color: .gray.mix(with: .black, by: 0.7),
                 service: CaptureService.shared,
                 binding: captureEnabled
+            ),
+            ServiceConfig(
+                name: "Clipboard",
+                iconName: "doc.on.clipboard.fill",
+                color: .teal,
+                service: ClipboardService.shared,
+                binding: clipboardEnabled
             ),
             ServiceConfig(
                 name: "Contacts",
@@ -167,6 +176,7 @@ final class ServerController: ObservableObject {
     // MARK: - AppStorage for Service Enablement States
     @AppStorage("calendarEnabled") private var calendarEnabled = false
     @AppStorage("captureEnabled") private var captureEnabled = false
+    @AppStorage("clipboardEnabled") private var clipboardEnabled = true
     @AppStorage("contactsEnabled") private var contactsEnabled = false
     @AppStorage("locationEnabled") private var locationEnabled = false
     @AppStorage("mapsEnabled") private var mapsEnabled = true  // Default enabled
@@ -184,6 +194,7 @@ final class ServerController: ObservableObject {
         ServiceRegistry.configureServices(
             calendarEnabled: $calendarEnabled,
             captureEnabled: $captureEnabled,
+            clipboardEnabled: $clipboardEnabled,
             contactsEnabled: $contactsEnabled,
             locationEnabled: $locationEnabled,
             mapsEnabled: $mapsEnabled,
