@@ -432,6 +432,8 @@ actor MCPConnectionManager {
         self.transport = NetworkTransport(
             connection: connection,
             logger: nil,
+            heartbeatConfig: .init(enabled: false),
+            reconnectionConfig: .disabled,
             bufferConfig: .unlimited
         )
 
@@ -627,6 +629,7 @@ actor ServerNetworkManager {
     private var connections: [UUID: MCPConnectionManager] = [:]
     private var connectionTasks: [UUID: Task<Void, Never>] = [:]
     private var pendingConnections: [UUID: String] = [:]
+    private var removedConnections: Set<UUID> = []
 
     typealias ConnectionApprovalHandler = @Sendable (UUID, MCP.Client.Info) async -> Bool
     private var connectionApprovalHandler: ConnectionApprovalHandler?
@@ -764,11 +767,20 @@ actor ServerNetworkManager {
         connections.removeAll()
         connectionTasks.removeAll()
         pendingConnections.removeAll()
+        removedConnections.removeAll()
 
         await discoveryManager?.stop()
     }
 
     func removeConnection(_ id: UUID) async {
+        // Guard against redundant removal — calling stop() on an already-stopped
+        // connection can trigger a double-resume in the SDK's transport continuation.
+        guard !removedConnections.contains(id) else {
+            log.debug("Connection \(id) already removed, skipping")
+            return
+        }
+        removedConnections.insert(id)
+
         log.debug("Removing connection: \(id)")
 
         if let connectionManager = connections[id] {
