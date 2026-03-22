@@ -50,6 +50,120 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
 
     var tools: [Tool] {
         Tool(
+            name: "messages_open",
+            description:
+                "Open a conversation in the Messages app. For group chats, finds and selects the existing conversation rather than creating a compose window.",
+            inputSchema: .object(
+                properties: [
+                    "participants": .array(
+                        description:
+                            "Participant handles (phone or email). Phone numbers should use E.164 format",
+                        items: .string()
+                    )
+                ],
+                required: ["participants"],
+                additionalProperties: false
+            ),
+            annotations: .init(
+                title: "Open Messages Conversation",
+                readOnlyHint: false,
+                openWorldHint: true
+            )
+        ) { arguments in
+            log.debug("Starting messages_open with arguments: \(arguments)")
+
+            let participants =
+                arguments["participants"]?.arrayValue?.compactMap({ $0.stringValue }) ?? []
+            guard !participants.isEmpty else {
+                throw DatabaseAccessError.invalidParticipants
+            }
+
+            if participants.count == 1 {
+                let handle = participants[0]
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if let url = URL(string: "imessage://\(handle)") {
+                    NSWorkspace.shared.open(url)
+                }
+                return [
+                    "status": "opened",
+                    "method": "url",
+                ]
+            }
+
+            // Group chat: query Messages DB to find the existing conversation
+            try await self.activate()
+            let db = try self.createDatabaseConnection()
+            let handles = try db.fetchParticipant(matching: participants)
+            let chats = try db.fetchChats(with: Set(handles))
+
+            guard chats.first(where: { Set($0.participants) == Set(handles) }) != nil else {
+                // No existing group chat — open compose window as fallback
+                let joined = participants.joined(separator: ",")
+                if let url = URL(string: "imessage://\(joined)") {
+                    NSWorkspace.shared.open(url)
+                }
+                return [
+                    "status": "opened_compose",
+                    "method": "url-compose",
+                ]
+            }
+
+            // Build search terms: email local part or full phone number
+            let searchTerms = participants.map { handle -> String in
+                if let atIndex = handle.firstIndex(of: "@") {
+                    return String(handle[handle.startIndex..<atIndex])
+                }
+                return handle
+            }
+
+            // AppleScript: activate Messages and click the group chat in the sidebar.
+            // Group chats display as "Name1 & Name2..." so we look for text
+            // containing "&" and at least one participant search term.
+            let termsForScript = searchTerms
+                .map { "\"\($0)\"" }
+                .joined(separator: ", ")
+            let source = """
+                tell application "Messages" to activate
+                delay 0.8
+                tell application "System Events"
+                    tell process "Messages"
+                        set allElements to entire contents of window 1
+                        repeat with anElement in allElements
+                            try
+                                if class of anElement is static text then
+                                    set elementValue to value of anElement
+                                    if elementValue contains "&" then
+                                        repeat with aTerm in {\(termsForScript)}
+                                            if elementValue contains aTerm then
+                                                click anElement
+                                                return "selected"
+                                            end if
+                                        end repeat
+                                    end if
+                                end if
+                            end try
+                        end repeat
+                    end tell
+                end tell
+                return "not_found"
+                """
+
+            var scriptError: NSDictionary?
+            let scriptResult = NSAppleScript(source: source)?
+                .executeAndReturnError(&scriptError)
+            let selected = scriptResult?.stringValue == "selected"
+
+            if !selected {
+                log.warning("Sidebar click failed: \(String(describing: scriptError))")
+            }
+
+            return [
+                "status": selected ? "opened" : "fallback",
+                "method": selected ? "sidebar-click" : "activate-only",
+            ]
+        }
+
+        Tool(
             name: "messages_fetch",
             description: "Fetch messages from the Messages app",
             inputSchema: .object(

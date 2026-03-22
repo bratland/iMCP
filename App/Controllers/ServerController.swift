@@ -869,11 +869,19 @@ actor ServerNetworkManager {
                     {
                         for tool in service.tools {
                             log.debug("Adding tool: \(tool.name)")
+                            let schemaValue: Value
+                            do {
+                                let data = try JSONEncoder().encode(tool.inputSchema)
+                                schemaValue = try JSONDecoder().decode(Value.self, from: data)
+                            } catch {
+                                log.error("Failed to convert schema for tool \(tool.name): \(error)")
+                                continue
+                            }
                             tools.append(
                                 .init(
                                     name: tool.name,
                                     description: tool.description,
-                                    inputSchema: tool.inputSchema,
+                                    inputSchema: schemaValue,
                                     annotations: tool.annotations
                                 )
                             )
