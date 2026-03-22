@@ -72,6 +72,10 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
                     "query": .string(
                         description: "Search term to filter messages by content"
                     ),
+                    "unread_only": .boolean(
+                        description:
+                            "If true, only return unread incoming messages (is_read = 0 and is_from_me = 0). Note: this is a best-effort approximation based on the Messages database and may not exactly match the Messages app badge count."
+                    ),
                     "limit": .integer(
                         description: "Maximum messages to return",
                         default: .int(defaultLimit)
@@ -117,6 +121,7 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
             }
 
             let searchTerm = arguments["query"]?.stringValue
+            let unreadOnly = arguments["unread_only"]?.boolValue ?? false
             let limit = arguments["limit"]?.intValue
 
             let db = try self.createDatabaseConnection()
@@ -126,11 +131,12 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
             let handles = try db.fetchParticipant(matching: participants)
 
             log.debug(
-                "Fetching messages with date range: \(String(describing: dateRange)), limit: \(limit ?? -1)"
+                "Fetching messages with date range: \(String(describing: dateRange)), unreadOnly: \(unreadOnly), limit: \(limit ?? -1)"
             )
             for message in try db.fetchMessages(
                 with: Set(handles),
                 in: dateRange,
+                unreadOnly: unreadOnly,
                 limit: max(limit ?? defaultLimit, 1024)
             ) {
                 guard messages.count < (limit ?? defaultLimit) else { break }
@@ -151,14 +157,19 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
                     }
                 }
 
-                messages.append([
+                var entry: [String: Value] = [
                     "@id": .string(message.id.description),
                     "sender": [
                         "@id": .string(sender)
                     ],
                     "text": .string(message.text),
                     "createdAt": .string(message.date.formatted(.iso8601)),
-                ])
+                    "isRead": .bool(message.isRead),
+                ]
+                if let dateRead = message.dateRead {
+                    entry["dateRead"] = .string(dateRead.formatted(.iso8601))
+                }
+                messages.append(entry)
             }
 
             log.debug("Successfully fetched \(messages.count) messages")
