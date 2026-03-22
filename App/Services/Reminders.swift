@@ -317,8 +317,12 @@ final class RemindersService: Service {
                     "title": .string(description: "New title for the reminder"),
                     "due": .string(
                         description:
-                            "New due date/time. If timezone is omitted, local time is assumed. Date-only uses local midnight.",
+                            "New due date/time. If timezone is omitted, local time is assumed. Date-only uses local midnight. Ignored if clear_due is true.",
                         format: .dateTime
+                    ),
+                    "clear_due": .boolean(
+                        description:
+                            "Set to true to remove the due date entirely. Also removes all alarms."
                     ),
                     "list": .string(
                         description: "Move to a different reminder list by name"
@@ -374,7 +378,10 @@ final class RemindersService: Service {
                 reminder.title = title
             }
 
-            if case .string(let dueDateStr) = arguments["due"],
+            if case .bool(let clearDue) = arguments["clear_due"], clearDue {
+                reminder.dueDateComponents = nil
+                reminder.alarms = nil
+            } else if case .string(let dueDateStr) = arguments["due"],
                 let parsedDueDate = ISO8601DateFormatter.parsedLenientISO8601Date(
                     fromISO8601String: dueDateStr
                 )
