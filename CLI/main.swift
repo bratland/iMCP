@@ -629,7 +629,7 @@ actor MCPService: Service {
 // Update the ServiceLifecycle initialization
 let lifecycle = ServiceGroup(
     configuration: .init(
-        services: [MCPService()],
+        services: [.init(service: MCPService(), successTerminationBehavior: .gracefullyShutdownGroup)],
         logger: log
     )
 )

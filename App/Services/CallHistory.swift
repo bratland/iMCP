@@ -205,7 +205,7 @@ final class CallHistoryService: NSObject, Service, NSOpenSavePanelDelegate {
             var params: [Any] = []
 
             if let participant = participant {
-                conditions.append("(h.ZVALUE LIKE ? OR h.ZVALUE LIKE ?)")
+                conditions.append("(c.ZADDRESS LIKE ? OR c.ZNAME LIKE ?)")
                 params.append("%\(participant)%")
                 params.append("%\(participant)%")
             }
@@ -241,15 +241,14 @@ final class CallHistoryService: NSObject, Service, NSOpenSavePanelDelegate {
             let query = """
                 SELECT
                     c.Z_PK,
-                    h.ZVALUE as phone_number,
+                    c.ZADDRESS,
+                    c.ZNAME,
                     c.ZDATE,
                     c.ZDURATION,
                     c.ZORIGINATED,
                     c.ZANSWERED,
-                    c.ZCALLTYPE,
                     c.ZSERVICE_PROVIDER
                 FROM ZCALLRECORD c
-                LEFT JOIN ZHANDLE h ON c.ZHANDLE = h.Z_PK
                 \(whereClause)
                 ORDER BY c.ZDATE DESC
                 LIMIT ?
@@ -279,22 +278,32 @@ final class CallHistoryService: NSObject, Service, NSOpenSavePanelDelegate {
 
             var calls: [[String: Value]] = []
             while sqlite3_step(stmt) == SQLITE_ROW {
+                // Columns: 0=Z_PK, 1=ZADDRESS, 2=ZNAME, 3=ZDATE, 4=ZDURATION,
+                //          5=ZORIGINATED, 6=ZANSWERED, 7=ZSERVICE_PROVIDER
                 let id = Int(sqlite3_column_int64(stmt, 0))
 
-                let phoneNumber: String
+                let address: String
                 if let cStr = sqlite3_column_text(stmt, 1) {
-                    phoneNumber = String(cString: cStr)
+                    address = String(cString: cStr)
                 } else {
-                    phoneNumber = "Unknown"
+                    address = "Unknown"
                 }
 
-                let coreDataDate = sqlite3_column_double(stmt, 2)
+                let name: String?
+                if let cStr = sqlite3_column_text(stmt, 2) {
+                    let n = String(cString: cStr)
+                    name = n.isEmpty ? nil : n
+                } else {
+                    name = nil
+                }
+
+                let coreDataDate = sqlite3_column_double(stmt, 3)
                 let unixTimestamp = coreDataDate + coreDataEpoch
                 let date = Date(timeIntervalSince1970: unixTimestamp)
 
-                let duration = sqlite3_column_double(stmt, 3)
-                let originated = sqlite3_column_int(stmt, 4)
-                let answered = sqlite3_column_int(stmt, 5)
+                let duration = sqlite3_column_double(stmt, 4)
+                let originated = sqlite3_column_int(stmt, 5)
+                let answered = sqlite3_column_int(stmt, 6)
 
                 let callType: String
                 if originated == 1 {
@@ -318,15 +327,20 @@ final class CallHistoryService: NSObject, Service, NSOpenSavePanelDelegate {
                     durationMinutes > 0
                     ? "\(durationMinutes)m \(durationSeconds)s" : "\(durationSeconds)s"
 
-                calls.append([
+                var entry: [String: Value] = [
                     "@id": .string(String(id)),
-                    "phoneNumber": .string(phoneNumber),
+                    "phoneNumber": .string(address),
                     "callType": .string(callType),
                     "date": .string(date.formatted(.iso8601)),
                     "duration": .string(durationStr),
                     "durationSeconds": .double(duration),
                     "serviceProvider": .string(serviceProvider),
-                ])
+                ]
+                if let name = name {
+                    entry["name"] = .string(name)
+                }
+
+                calls.append(entry)
             }
 
             return calls
