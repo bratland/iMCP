@@ -206,6 +206,11 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
             log.debug("Starting message fetch with arguments: \(arguments)")
             try await self.activate()
 
+            // Activate Messages.app to nudge iCloud sync for recent messages
+            // from other devices. Without this, chat.db may be stale.
+            NSWorkspace.shared.open(URL(string: "imessage://")!)
+            try await Task.sleep(for: .seconds(2))
+
             let participants =
                 arguments["participants"]?.arrayValue?.compactMap({
                     $0.stringValue
