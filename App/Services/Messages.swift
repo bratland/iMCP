@@ -208,7 +208,12 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
 
             // Activate Messages.app to nudge iCloud sync for recent messages
             // from other devices. Without this, chat.db may be stale.
-            NSWorkspace.shared.open(URL(string: "imessage://")!)
+            // Use bundle activation (not imessage:// which opens a compose window).
+            if let app = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.MobileSMS").first {
+                app.activate()
+            } else {
+                NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Messages.app"))
+            }
             try await Task.sleep(for: .seconds(2))
 
             let participants =
