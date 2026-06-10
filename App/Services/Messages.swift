@@ -91,7 +91,9 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
             }
 
             // Group chat: query Messages DB to find the existing conversation
-            try await self.activate()
+            guard await self.isActivated else {
+                throw DatabaseAccessError.noBookmarkFound
+            }
             let db = try self.createDatabaseConnection()
             let handles = try db.fetchParticipant(matching: participants)
             let chats = try db.fetchChats(with: Set(handles))
@@ -204,7 +206,9 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
             )
         ) { arguments in
             log.debug("Starting message fetch with arguments: \(arguments)")
-            try await self.activate()
+            guard await self.isActivated else {
+                throw DatabaseAccessError.noBookmarkFound
+            }
 
             // Activate Messages.app to nudge iCloud sync for recent messages
             // from other devices. Without this, chat.db may be stale.

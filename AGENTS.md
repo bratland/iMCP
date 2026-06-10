@@ -104,6 +104,10 @@ External packages (referenced in Xcode project):
 4. Add `@AppStorage` binding and `ServiceConfig` entry in `ServerController`
 5. Tool results should use Ontology types or `Value` enum
 
+## Service Patterns
+
+- **Never call `activate()` from inside a tool handler.** It presents a modal permission/file-picker prompt on the main thread and blocks until the user responds — MCP clients (Claude Desktop, Cursor) time out the JSON-RPC request long before that happens. Instead, guard with `isActivated` at the top of the handler and return a `MCPError.invalidRequest("…not activated. Enable it in the iMCP menu bar app.")`. Permission acquisition belongs in the menu bar UI's toggle path (`ServerController` activation flow), not in tool execution. See `CallHistory.swift:91-93`, `Messages.swift:94-96` / `:207-209` for the canonical guard pattern.
+
 ## Notes
 
 - Ignore spurious SourceKit warnings about missing types/modules — assume types exist

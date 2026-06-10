@@ -9,6 +9,10 @@
 			information.</string>
 		<key>NSAppleEventsUsageDescription</key>
 		<string>iMCP uses Apple Events to control and read now playing data from Music.</string>
+		<key>NSPhotoLibraryUsageDescription</key>
+		<string>iMCP uses Photos access to search your library's on-device semantic index (same as the Photos app search) and export selected images.</string>
+		<key>NSPhotoLibraryAddUsageDescription</key>
+		<string>iMCP needs Photos access to read and export images.</string>
 		<key>NSBonjourServices</key>
 		<array>
 			<string>_mcp._tcp</string>

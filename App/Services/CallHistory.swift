@@ -88,7 +88,9 @@ final class CallHistoryService: NSObject, Service, NSOpenSavePanelDelegate {
             )
         ) { arguments in
             log.debug("Starting call history fetch with arguments: \(arguments)")
-            try await self.activate()
+            guard await self.isActivated else {
+                throw DatabaseAccessError.noBookmarkFound
+            }
 
             let participant = arguments["participant"]?.stringValue
             let callTypeFilter = arguments["call_type"]?.stringValue

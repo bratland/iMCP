@@ -66,6 +66,7 @@ struct SettingsView: View {
 
 struct GeneralSettingsView: View {
     @ObservedObject var serverController: ServerController
+    @ObservedObject private var launchAtLogin = LaunchAtLoginController.shared
     @State private var showingResetAlert = false
     @State private var selectedClients = Set<String>()
 
@@ -75,6 +76,16 @@ struct GeneralSettingsView: View {
 
     var body: some View {
         Form {
+            Section {
+                Toggle("Open at Login", isOn: launchAtLogin.binding)
+                Text("Start iMCP automatically when you log in to your Mac.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text("Startup")
+                    .font(.headline)
+            }
+
             Section {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
@@ -128,6 +139,9 @@ struct GeneralSettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .onAppear {
+            launchAtLogin.refresh()
+        }
         .alert("Remove All Trusted Clients", isPresented: $showingResetAlert) {
             Button("Cancel", role: .cancel) {}
             Button("Remove All", role: .destructive) {

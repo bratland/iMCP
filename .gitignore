@@ -36,3 +36,7 @@ playground.xcworkspace
 
 # Release artifacts
 dist/
+build/
+
+# Local development
+_swift-sdk-local.hidden/

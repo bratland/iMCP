@@ -8,6 +8,8 @@
 		<true />
 		<key>com.apple.security.personal-information.health</key>
 		<true />
+		<key>com.apple.security.personal-information.photos-library</key>
+		<true />
 		<key>com.apple.security.temporary-exception.apple-events</key>
 		<array>
 			<string>com.apple.Music</string>
@@ -16,6 +18,11 @@
 		<key>com.apple.security.temporary-exception.files.absolute-path.read-write</key>
 		<array>
 			<string>/Users/*/Library/Messages/</string>
+		</array>
+		<key>com.apple.security.temporary-exception.files.absolute-path.read-only</key>
+		<array>
+			<string>/Users/*/Pictures/</string>
+			<string>/Users/*/Library/Application Support/CallHistoryDB/</string>
 		</array>
 		<key>com.apple.security.temporary-exception.mach-lookup.global-name</key>
 		<array>
