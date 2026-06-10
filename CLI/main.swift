@@ -5,6 +5,7 @@ import ServiceLifecycle
 import SystemPackage
 
 import struct Foundation.Data
+import class Foundation.JSONSerialization
 import class Foundation.RunLoop
 
 var log = Logger(label: "me.mattt.iMCP.server") { StreamLogHandler.standardError(label: $0) }
@@ -22,6 +23,16 @@ parameters.includePeerToPeer = false
 
 if let tcpOptions = parameters.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options {
     tcpOptions.version = .v4
+}
+
+// Detect half-open connections (e.g. after system sleep): without keepalive a dead peer is
+// never noticed and the proxy waits on receive() forever. With these settings a dead
+// connection fails within ~25 seconds (10s idle + 3 probes * 5s).
+if let tcpOptions = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
+    tcpOptions.enableKeepalive = true
+    tcpOptions.keepaliveIdle = 10
+    tcpOptions.keepaliveInterval = 5
+    tcpOptions.keepaliveCount = 3
 }
 
 // Create browser at top level
@@ -58,6 +69,13 @@ actor StdioProxy {
     // Message buffering for proper JSON-RPC message boundaries
     private var networkToStdoutBuffer = Data()
 
+    // Response watchdog: timestamps of forwarded requests still awaiting a response.
+    // Slightly longer than the app's 30-second tool timeout so a live app always gets to
+    // answer first; this only fires when the transport itself has gone dead.
+    private let responseTimeout: Duration = .seconds(35)
+    private var stdinParseBuffer = Data()
+    private var pendingRequestStarts: [ContinuousClock.Instant] = []
+
     /// Creates a new StdioProxy with the specified network configuration
     /// - Parameters:
     ///   - endpoint: The network endpoint to connect to
@@ -85,17 +103,13 @@ actor StdioProxy {
         let connection = NWConnection(to: endpoint, using: parameters)
         self.connection = connection
 
-        // Start the connection
-        connection.start(queue: .main)
-
-        // Set up state monitoring for the entire lifetime of the connection
-        connection.stateUpdateHandler = { state in
-            Task { [weak self] in
-                await self?.handleConnectionState(state, continuation: nil, connectionState: nil)
-            }
-        }
-
-        // Wait for the connection to become ready
+        // Wait for the connection to become ready.
+        //
+        // The state handler is installed *before* `connection.start()` and both run inside the
+        // same synchronous continuation closure. This is required to avoid a lost-wakeup deadlock:
+        // if the connection were started first, a `.ready` (or `.failed`) state delivered on the
+        // main queue could fire before the continuation handler is installed, and the continuation
+        // would never be resumed, hanging the proxy forever.
         try await withCheckedThrowingContinuation {
             (continuation: CheckedContinuation<Void, Swift.Error>) in
             let connectionState = ConnectionState()
@@ -107,6 +121,15 @@ actor StdioProxy {
                         connectionState: connectionState
                     )
                 }
+            }
+            connection.start(queue: .main)
+        }
+
+        // Replace the setup handler with a lifetime monitor. The continuation has already been
+        // consumed (guarded by ConnectionState), so further state changes only drive teardown.
+        connection.stateUpdateHandler = { state in
+            Task { [weak self] in
+                await self?.handleConnectionState(state, continuation: nil, connectionState: nil)
             }
         }
 
@@ -132,8 +155,22 @@ actor StdioProxy {
                 }
             }
 
-            // Wait for any task to complete (or fail)
-            try await group.next()
+            // Watchdog: fail fast when a forwarded request never gets a response.
+            group.addTask {
+                try await self.runResponseWatchdog()
+            }
+
+            // Wait for any task to complete (or fail). On both paths the connection must be
+            // cancelled via stop() *before* the group is awaited: handlers blocked in
+            // send/receive continuations are not cancellation-aware and only unblock when
+            // the connection delivers their callback with an error.
+            do {
+                try await group.next()
+            } catch {
+                group.cancelAll()
+                await self.stop()
+                throw error
+            }
             await log.debug("A task completed, cancelling remaining tasks")
 
             // If we get here, one of the tasks completed or failed
@@ -188,6 +225,47 @@ actor StdioProxy {
             await log.debug("Connection setup...")
         @unknown default:
             await log.debug("Unknown connection state")
+        }
+    }
+
+    /// Records outbound JSON-RPC requests (messages with both "method" and "id") so the
+    /// watchdog can detect a transport that has stopped delivering responses.
+    private func trackOutboundRequests(in data: Data) {
+        stdinParseBuffer.append(data)
+        while let newlineIndex = stdinParseBuffer.firstIndex(of: UInt8(ascii: "\n")) {
+            let lineData = Data(stdinParseBuffer[..<newlineIndex])
+            stdinParseBuffer = stdinParseBuffer[(newlineIndex + 1)...]
+            guard
+                let message = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                message["method"] != nil, message["id"] != nil
+            else { continue }
+            pendingRequestStarts.append(ContinuousClock.now)
+        }
+    }
+
+    /// Settles the oldest pending request when a server response arrives.
+    private func trackInboundResponse(in messageData: Data) {
+        guard !pendingRequestStarts.isEmpty,
+            let message = try? JSONSerialization.jsonObject(with: messageData) as? [String: Any],
+            message["id"] != nil, message["method"] == nil
+        else { return }
+        pendingRequestStarts.removeFirst()
+    }
+
+    /// Fails the proxy when a forwarded request has gone unanswered for too long. This catches
+    /// dead transports that TCP keepalive misses; terminating lets the MCP client fail the
+    /// pending call and respawn the proxy instead of hanging indefinitely.
+    private func runResponseWatchdog() async throws {
+        while true {
+            try await Task.sleep(for: .seconds(1))
+            guard isRunning else { return }
+            if let oldest = pendingRequestStarts.first,
+                ContinuousClock.now - oldest > responseTimeout
+            {
+                await log.error(
+                    "No response from iMCP app within \(responseTimeout), closing connection")
+                throw StdioProxyError.responseTimeout
+            }
         }
     }
 
@@ -272,6 +350,7 @@ actor StdioProxy {
                         }
 
                         await log.debug("Sent \(pendingData.count) bytes to network")
+                        trackOutboundRequests(in: pendingData)
                     } else if isOnlyWhitespace && !pendingData.isEmpty {
                         await log.trace(
                             "Skipping send of \(pendingData.count) whitespace-only bytes"
@@ -413,6 +492,8 @@ actor StdioProxy {
                     // Remove processed message from buffer
                     networkToStdoutBuffer = networkToStdoutBuffer[(newlineIndex + 1)...]
 
+                    trackInboundResponse(in: Data(messageData))
+
                     // Write complete message to stdout
                     var remainingDataToWrite = messageWithNewline
                     while !remainingDataToWrite.isEmpty {
@@ -467,6 +548,7 @@ actor StdioProxy {
 enum StdioProxyError: Swift.Error {
     case networkTimeout
     case connectionClosed
+    case responseTimeout
 }
 
 // Create MCPService class to manage lifecycle
@@ -599,6 +681,11 @@ actor MCPService: Service {
                         continue
                     case .connectionClosed:
                         await log.critical("Connection closed, terminating...")
+                        return
+                    case .responseTimeout:
+                        // Exit so the MCP client fails the pending call immediately and
+                        // respawns a fresh proxy, instead of letting it hang on a dead link.
+                        await log.critical("Request unanswered, terminating...")
                         return
                     }
                 } catch let error as NWError where error.errorCode == 54 || error.errorCode == 57 {

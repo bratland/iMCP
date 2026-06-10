@@ -8,7 +8,9 @@ final class ShortcutsService: Service {
     static let shared = ShortcutsService()
 
     private let shortcutsPath = "/usr/bin/shortcuts"
-    private let executionTimeout: Duration = .seconds(300)
+    // Matches the global tool-call timeout in ServerController: a longer process timeout would
+    // never be observed by the client, only leave the shortcut running detached.
+    private let executionTimeout: Duration = .seconds(30)
 
     var tools: [Tool] {
         Tool(
@@ -178,7 +180,7 @@ final class ShortcutsService: Service {
                         code: 6,
                         userInfo: [
                             NSLocalizedDescriptionKey:
-                                "Shortcut '\(name)' timed out after 5 minutes"
+                                "Shortcut '\(name)' timed out after 30 seconds"
                         ]
                     )
                 }

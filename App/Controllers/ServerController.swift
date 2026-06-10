@@ -17,6 +17,38 @@ private let serviceDomain = "local."
 
 private let log = Logger.server
 
+// Hard ceiling on tool execution: the client must always get a response within this window,
+// even if a service hangs on a system framework call (Photos, EventKit, network, etc.).
+private let toolCallTimeout: Duration = .seconds(30)
+
+private struct ToolCallTimeoutError: Swift.Error, CustomStringConvertible {
+    let toolName: String
+    var description: String {
+        "Tool '\(toolName)' timed out after 30 seconds"
+    }
+}
+
+private func withToolCallTimeout<T: Sendable>(
+    toolName: String,
+    operation: @escaping @Sendable () async throws -> T
+) async throws -> T {
+    try await withThrowingTaskGroup(of: T.self) { group in
+        group.addTask {
+            try await operation()
+        }
+        group.addTask {
+            try await Task.sleep(for: toolCallTimeout)
+            throw ToolCallTimeoutError(toolName: toolName)
+        }
+        guard let result = try await group.next() else {
+            throw ToolCallTimeoutError(toolName: toolName)
+        }
+        group.cancelAll()
+        return result
+    }
+}
+
+
 struct ServiceConfig: Identifiable {
     let id: String
     let name: String
@@ -58,6 +90,7 @@ enum ServiceRegistry {
             MapsService.shared,
             MusicService.shared,
             MessageService.shared,
+            PhotosService.shared,
             RemindersService.shared,
             ShortcutsService.shared,
             UtilitiesService.shared,
@@ -79,6 +112,7 @@ enum ServiceRegistry {
         mapsEnabled: Binding<Bool>,
         musicEnabled: Binding<Bool>,
         messagesEnabled: Binding<Bool>,
+        photosEnabled: Binding<Bool>,
         remindersEnabled: Binding<Bool>,
         shortcutsEnabled: Binding<Bool>,
         utilitiesEnabled: Binding<Bool>,
@@ -149,6 +183,13 @@ enum ServiceRegistry {
                 binding: messagesEnabled
             ),
             ServiceConfig(
+                name: "Photos",
+                iconName: "photo.on.rectangle.angled",
+                color: .yellow,
+                service: PhotosService.shared,
+                binding: photosEnabled
+            ),
+            ServiceConfig(
                 name: "Reminders",
                 iconName: "list.bullet",
                 color: .orange,
@@ -201,6 +242,7 @@ final class ServerController: ObservableObject {
     @AppStorage("mapsEnabled") private var mapsEnabled = true  // Default enabled
     @AppStorage("musicEnabled") private var musicEnabled = false
     @AppStorage("messagesEnabled") private var messagesEnabled = false
+    @AppStorage("photosEnabled") private var photosEnabled = false
     @AppStorage("remindersEnabled") private var remindersEnabled = false
     @AppStorage("shortcutsEnabled") private var shortcutsEnabled = false
     @AppStorage("utilitiesEnabled") private var utilitiesEnabled = true  // Default enabled
@@ -221,6 +263,7 @@ final class ServerController: ObservableObject {
             mapsEnabled: $mapsEnabled,
             musicEnabled: $musicEnabled,
             messagesEnabled: $messagesEnabled,
+            photosEnabled: $photosEnabled,
             remindersEnabled: $remindersEnabled,
             shortcutsEnabled: $shortcutsEnabled,
             utilitiesEnabled: $utilitiesEnabled,
@@ -296,8 +339,11 @@ final class ServerController: ObservableObject {
 
     init() {
         Task {
-            // Initialize bindings from AppStorage before the server starts.
-            await networkManager.updateServiceBindings(self.currentServiceBindings)
+            // Initialize the enablement snapshot from AppStorage before the server starts.
+            // Reading `.wrappedValue` here is safe: this runs on the main actor.
+            await networkManager.updateServiceEnablement(
+                self.currentServiceBindings.mapValues { $0.wrappedValue }
+            )
             await self.networkManager.start()
             self.updateServerStatus("Running")
 
@@ -334,8 +380,9 @@ final class ServerController: ObservableObject {
     }
 
     func updateServiceBindings(_ bindings: [String: Binding<Bool>]) async {
-        // Called by the UI when service toggles change.
-        await networkManager.updateServiceBindings(bindings)
+        // Called by the UI when service toggles change. Convert the SwiftUI bindings to a plain
+        // Sendable snapshot on the main actor before handing it to the network actor.
+        await networkManager.updateServiceEnablement(bindings.mapValues { $0.wrappedValue })
     }
 
     func startServer() async {
@@ -664,11 +711,21 @@ actor ServerNetworkManager {
     private var pendingConnections: [UUID: String] = [:]
     private var removedConnections: Set<UUID> = []
 
+    // Connections currently blocked on the user's approval dialog. The setup timeout must not
+    // tear these down: the user has no time bound on the dialog, so a fixed timeout would race
+    // against (and lose to) a slow but legitimate approval.
+    private var awaitingApproval: Set<UUID> = []
+
     typealias ConnectionApprovalHandler = @Sendable (UUID, MCP.Client.Info) async -> Bool
     private var connectionApprovalHandler: ConnectionApprovalHandler?
 
     private let services = ServiceRegistry.services
-    private var serviceBindings: [String: Binding<Bool>] = [:]
+
+    // A plain, Sendable snapshot of which services are enabled. We deliberately do NOT store
+    // SwiftUI `Binding<Bool>` here: bindings are not Sendable and are coupled to the main actor
+    // (via @AppStorage), so reading `.wrappedValue` from this actor's executor would be a data
+    // race. The main actor pushes fresh snapshots via `updateServiceEnablement(_:)`.
+    private var serviceEnablement: [String: Bool] = [:]
 
     init() {
         do {
@@ -683,6 +740,14 @@ actor ServerNetworkManager {
 
     func isRunning() -> Bool {
         isRunningState
+    }
+
+    private func setAwaitingApproval(_ id: UUID, _ value: Bool) {
+        if value {
+            awaitingApproval.insert(id)
+        } else {
+            awaitingApproval.remove(id)
+        }
     }
 
     func setConnectionApprovalHandler(_ handler: @escaping ConnectionApprovalHandler) {
@@ -801,6 +866,7 @@ actor ServerNetworkManager {
         connectionTasks.removeAll()
         pendingConnections.removeAll()
         removedConnections.removeAll()
+        awaitingApproval.removeAll()
 
         await discoveryManager?.stop()
     }
@@ -827,6 +893,7 @@ actor ServerNetworkManager {
         connections.removeValue(forKey: id)
         connectionTasks.removeValue(forKey: id)
         pendingConnections.removeValue(forKey: id)
+        awaitingApproval.remove(id)
     }
 
     // Handle new incoming connections.
@@ -857,7 +924,12 @@ actor ServerNetworkManager {
                 }
 
                 try await connectionManager.start { clientInfo in
-                    await approvalHandler(connectionID, clientInfo)
+                    // Mark the connection as awaiting approval so the setup timeout skips it
+                    // while the user decides, then clear the flag once a decision is made.
+                    self.setAwaitingApproval(connectionID, true)
+                    let approved = await approvalHandler(connectionID, clientInfo)
+                    self.setAwaitingApproval(connectionID, false)
+                    return approved
                 }
 
                 log.notice("Connection \(connectionID) successfully established")
@@ -873,9 +945,11 @@ actor ServerNetworkManager {
         Task {
             try? await Task.sleep(nanoseconds: 10_000_000_000)  // 10 seconds
 
-            // If the setup task is still registered, treat it as timed out.
+            // If the setup task is still registered, treat it as timed out — unless the
+            // connection is blocked on the user's approval dialog, which has no time bound.
             if self.connectionTasks[connectionID] != nil,
-                self.connections[connectionID] != nil
+                self.connections[connectionID] != nil,
+                !self.awaitingApproval.contains(connectionID)
             {
                 log.warning(
                     "Connection \(connectionID) setup timed out (task still in registry), closing it"
@@ -908,10 +982,8 @@ actor ServerNetworkManager {
                 for service in await self.services {
                     let serviceId = String(describing: type(of: service))
 
-                    // Read binding on the actor for consistency.
-                    if let isServiceEnabled = await self.serviceBindings[serviceId]?.wrappedValue,
-                        isServiceEnabled
-                    {
+                    // Read the enablement snapshot on the actor for consistency.
+                    if await self.serviceEnablement[serviceId] == true {
                         for tool in service.tools {
                             log.debug("Adding tool: \(tool.name)")
                             let schemaValue: Value
@@ -960,16 +1032,14 @@ actor ServerNetworkManager {
             for service in await self.services {
                 let serviceId = String(describing: type(of: service))
 
-                // Read binding on the actor for consistency.
-                if let isServiceEnabled = await self.serviceBindings[serviceId]?.wrappedValue,
-                    isServiceEnabled
-                {
+                // Read the enablement snapshot on the actor for consistency.
+                if await self.serviceEnablement[serviceId] == true {
                     do {
+                        let arguments = params.arguments ?? [:]
                         guard
-                            let value = try await service.call(
-                                tool: params.name,
-                                with: params.arguments ?? [:]
-                            )
+                            let value = try await withToolCallTimeout(toolName: params.name, operation: {
+                                try await service.call(tool: params.name, with: arguments)
+                            })
                         else {
                             continue
                         }
@@ -1044,9 +1114,9 @@ actor ServerNetworkManager {
         }
     }
 
-    // Update service bindings.
-    func updateServiceBindings(_ newBindings: [String: Binding<Bool>]) async {
-        self.serviceBindings = newBindings
+    // Update the service enablement snapshot.
+    func updateServiceEnablement(_ newEnablement: [String: Bool]) async {
+        self.serviceEnablement = newEnablement
 
         // Notify clients that tool availability may have changed.
         Task {
