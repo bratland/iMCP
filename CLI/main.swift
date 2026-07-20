@@ -317,9 +317,11 @@ actor StdioProxy {
                 }
 
                 if bytesRead == 0 {
-                    // EOF reached
-                    await log.debug("EOF reached on stdin, stopping stdin handler")
-                    break
+                    // EOF on stdin means the MCP client is gone. This must terminate the
+                    // proxy: returning normally would let MCPService.run() reconnect in a
+                    // tight loop (~200 connections/s) and storm the app's listener.
+                    await log.debug("EOF reached on stdin, terminating proxy")
+                    throw StdioProxyError.stdinClosed
                 }
 
                 if bytesRead > 0 {
@@ -370,8 +372,6 @@ actor StdioProxy {
                 throw error
             }
         }
-
-        await log.debug("Stdin handler task completed")
     }
 
     /// Handles forwarding data from the network to stdout
@@ -549,6 +549,7 @@ enum StdioProxyError: Swift.Error {
     case networkTimeout
     case connectionClosed
     case responseTimeout
+    case stdinClosed
 }
 
 // Create MCPService class to manage lifecycle
@@ -668,6 +669,11 @@ actor MCPService: Service {
 
                 do {
                     try await proxy.start()
+
+                    // A normal return means the proxy shut down cleanly. Terminate rather
+                    // than reconnect: looping here has no backoff and would hammer the app.
+                    await log.info("Proxy completed, terminating...")
+                    return
                 } catch let error as StdioProxyError {
                     switch error {
                     // Removed stdinTimeout case as it's no longer thrown
@@ -681,6 +687,10 @@ actor MCPService: Service {
                         continue
                     case .connectionClosed:
                         await log.critical("Connection closed, terminating...")
+                        return
+                    case .stdinClosed:
+                        // The MCP client closed our stdin; there is no one left to serve.
+                        await log.info("Stdin closed by client, terminating...")
                         return
                     case .responseTimeout:
                         // Exit so the MCP client fails the pending call immediately and
