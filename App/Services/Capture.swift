@@ -280,7 +280,8 @@ final class CaptureService: NSObject, Service {
 
                 Task { @MainActor in
                     if delay > 0 {
-                        try await Task.sleep(for: .seconds(delay))
+                        // Cancellation is handled by `timeoutTask`, which resumes the continuation.
+                        try? await Task.sleep(for: .seconds(delay))
                     }
 
                     let settings = AVCapturePhotoSettings()
@@ -291,11 +292,13 @@ final class CaptureService: NSObject, Service {
                     let delegate = PhotoCaptureDelegate(
                         format: format,
                         quality: quality,
-                        completion: { [weak self] result in
+                        completion: { result in
+                            // `self` is a singleton (CaptureService.shared); the strong capture is
+                            // released as soon as `currentPhotoDelegate` is cleared below.
                             Task { @MainActor in
                                 timeoutTask.cancel()
                                 captureSession.stopRunning()
-                                self?.currentPhotoDelegate = nil
+                                self.currentPhotoDelegate = nil
                                 await resumeOnce(result, nil)
                             }
                         }
@@ -384,7 +387,8 @@ final class CaptureService: NSObject, Service {
 
             return try await withCheckedThrowingContinuation { continuation in
                 Task {
-                    try await Task.sleep(for: .seconds(duration + 0.5))
+                    // On cancellation, stop early and return whatever was recorded.
+                    try? await Task.sleep(for: .seconds(duration + 0.5))
                     recorder.stop()
 
                     do {

@@ -114,7 +114,7 @@ actor StdioProxy {
             (continuation: CheckedContinuation<Void, Swift.Error>) in
             let connectionState = ConnectionState()
             connection.stateUpdateHandler = { state in
-                Task { [weak self] in
+                Task { [weak self = self] in
                     await self?.handleConnectionState(
                         state,
                         continuation: continuation,
@@ -127,7 +127,7 @@ actor StdioProxy {
 
         // Replace the setup handler with a lifetime monitor. The continuation has already been
         // consumed (guarded by ConnectionState), so further state changes only drive teardown.
-        connection.stateUpdateHandler = { state in
+        connection.stateUpdateHandler = { [weak self] state in
             Task { [weak self] in
                 await self?.handleConnectionState(state, continuation: nil, connectionState: nil)
             }
@@ -620,24 +620,18 @@ actor MCPService: Service {
                             // If we have results, select the most appropriate one
                             if !results.isEmpty {
                                 // First, try to find a service with "iMCP" in the endpoint description
-                                let imcpServices = results.filter {
-                                    String(describing: $0.endpoint).contains("iMCP")
-                                }
+                                let imcpServices = results.filter { String(describing: $0.endpoint).contains("iMCP") }
 
                                 let selectedService: NWBrowser.Result
 
                                 if !imcpServices.isEmpty {
                                     // Prefer services with iMCP in the description
                                     selectedService = imcpServices.first!
-                                    await log.info(
-                                        "Selected iMCP service: \(selectedService.endpoint)"
-                                    )
+                                    await log.info("Selected iMCP service: \(selectedService.endpoint)")
                                 } else {
                                     // Fall back to the first available service
                                     selectedService = results.first!
-                                    await log.info(
-                                        "No specific iMCP service found, using: \(selectedService.endpoint)"
-                                    )
+                                    await log.info("No specific iMCP service found, using: \(selectedService.endpoint)")
                                 }
 
                                 if await connectionState.checkAndSetResumed() {
@@ -732,3 +726,4 @@ let lifecycle = ServiceGroup(
 )
 
 try await lifecycle.run()
+

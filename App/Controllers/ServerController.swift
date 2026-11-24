@@ -338,7 +338,7 @@ final class ServerController: ObservableObject {
     }
 
     init() {
-        Task {
+        Task { [self] in
             // Initialize the enablement snapshot from AppStorage before the server starts.
             // Reading `.wrappedValue` here is safe: this runs on the main actor.
             await networkManager.updateServiceEnablement(
@@ -347,8 +347,7 @@ final class ServerController: ObservableObject {
             await self.networkManager.start()
             self.updateServerStatus("Running")
 
-            await networkManager.setConnectionApprovalHandler {
-                [weak self] connectionID, clientInfo in
+            await networkManager.setConnectionApprovalHandler { [weak self] connectionID, clientInfo in
                 guard let self = self else {
                     return false
                 }
@@ -356,7 +355,7 @@ final class ServerController: ObservableObject {
                 log.debug("ServerManager: Approval handler called for client \(clientInfo.name)")
 
                 // Bridge approval UI actions back into the async handler.
-                return await withCheckedContinuation { continuation in
+                return await withCheckedContinuation { [weak self] continuation in
                     let resumeGate = ResumeGate()
                     let resumeOnce: (Bool) async -> Void = { value in
                         guard await resumeGate.shouldResume() else { return }
@@ -364,6 +363,7 @@ final class ServerController: ObservableObject {
                     }
 
                     Task { @MainActor in
+                        guard let self = self else { return }
                         self.showConnectionApprovalAlert(
                             clientID: clientInfo.name,
                             approve: {
@@ -1126,3 +1126,4 @@ actor ServerNetworkManager {
         }
     }
 }
+
